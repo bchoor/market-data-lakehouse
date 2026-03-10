@@ -97,9 +97,10 @@ def build_client() -> OptionHistoricalDataClient:
 def fetch_option_chain_snapshot(
     client: OptionHistoricalDataClient,
     underlying: str,
+    snapshot_date: date | None = None,
 ) -> list[dict]:
     """
-    Fetch the current options chain snapshot for *underlying*.
+    Fetch the options chain snapshot for *underlying* on *snapshot_date*.
 
     Returns a list of row dicts matching the target schema.
     On free tier this is always the current chain — historical snapshots
@@ -107,15 +108,26 @@ def fetch_option_chain_snapshot(
     """
     for attempt in range(_RETRY_MAX_ATTEMPTS):
         try:
-            req = OptionChainRequest(
+            # Build request kwargs; add date if the SDK accepts it
+            req_kwargs: dict = dict(
                 underlying_symbol=underlying,
                 feed=OptionsFeed.INDICATIVE,
             )
+            if snapshot_date is not None:
+                # Attempt to pass date; SDK may or may not support it
+                try:
+                    req = OptionChainRequest(**req_kwargs, date=snapshot_date)
+                except TypeError:
+                    req = OptionChainRequest(**req_kwargs)
+            else:
+                req = OptionChainRequest(**req_kwargs)
             chain = client.get_option_chain(req)
             # chain is a dict keyed by option symbol → OptionSnapshot
             rows = []
             for symbol, snap in chain.items():
-                rows.append(_snapshot_to_row(underlying, snap))
+                row = _snapshot_to_row(underlying, symbol, snap)
+                if row is not None:
+                    rows.append(row)
             return rows
         except Exception as exc:
             if _is_rate_limit_error(exc):
@@ -125,16 +137,20 @@ def fetch_option_chain_snapshot(
                 logger.error(f"Max retries reached for {underlying} snapshot.")
                 return []
             if _is_no_data_error(exc):
-                logger.info(f"No snapshot data for {underlying}: {exc}")
+                logger.info(f"No snapshot data for {underlying} on {snapshot_date}: {exc}")
                 return []
-            # Unexpected error — re-raise after logging
+            # Unexpected error — log and return empty
             logger.error(f"Unexpected error fetching snapshot for {underlying}: {exc}")
             return []
     return []
 
 
-def _snapshot_to_row(underlying: str, snap) -> dict:
-    """Convert an Alpaca OptionSnapshot object to a flat row dict."""
+def _snapshot_to_row(underlying: str, symbol: str, snap) -> dict | None:
+    """Convert an Alpaca OptionSnapshot object to a flat row dict.
+
+    Returns None if the contract cannot be classified as call or put (caller
+    should skip None entries).
+    """
     greeks = getattr(snap, 'greeks', None)
     details = getattr(snap, 'details', None)
 
@@ -145,7 +161,13 @@ def _snapshot_to_row(underlying: str, snap) -> dict:
     # Normalise option_type to "call" / "put"
     if option_type_raw is not None:
         ot_str = str(option_type_raw).lower()
-        option_type = 'call' if 'call' in ot_str else 'put'
+        if 'call' in ot_str:
+            option_type = 'call'
+        elif 'put' in ot_str:
+            option_type = 'put'
+        else:
+            logger.warning(f"Unrecognised option_type: {option_type_raw!r}, skipping contract")
+            return None
     else:
         option_type = None
 
@@ -169,11 +191,13 @@ def _snapshot_to_row(underlying: str, snap) -> dict:
 
     # Trade / misc fields
     iv = float(getattr(snap, 'implied_volatility', 0.0) or 0.0)
-    volume = int(getattr(snap, 'day', None) and getattr(snap.day, 'volume', 0) or 0)
+    day = getattr(snap, 'day', None)
+    volume = int(getattr(day, 'volume', 0) or 0) if day is not None else 0
     open_interest = int(getattr(snap, 'open_interest', 0) or 0)
     in_the_money = bool(getattr(snap, 'in_the_money', False) or False)
 
     return {
+        'symbol': symbol,
         'underlying': underlying,
         'expiration': expiration,
         'strike': strike,
@@ -218,6 +242,7 @@ def output_path(output_dir: Path, underlying: str, d: date) -> Path:
 _SCHEMA_DTYPES: dict[str, str] = {
     'date': 'object',           # will be cast to date before saving
     'underlying': 'string',
+    'symbol': 'string',
     'expiration': 'object',
     'strike': 'float64',
     'option_type': 'string',
@@ -264,9 +289,24 @@ def rows_to_dataframe(rows: list[dict], snapshot_date: date, underlying: str) ->
         df['option_type'] = pd.NA
     df['option_type'] = df['option_type'].astype('string')
 
-    # Ensure column order (only include columns we know about)
-    existing = [c for c in _COLUMN_ORDER if c in df.columns]
-    return df[existing]
+    # Cast date column to proper date dtype
+    df['date'] = pd.to_datetime(df['date']).dt.date
+
+    # Ensure all schema columns are always present with appropriate defaults
+    for col, dtype in _SCHEMA_DTYPES.items():
+        if col not in df.columns:
+            if dtype == 'boolean':
+                df[col] = pd.array([False] * len(df), dtype='boolean')
+            elif dtype in ('Int64',):
+                df[col] = pd.array([0] * len(df), dtype='Int64')
+            elif dtype == 'float64':
+                df[col] = 0.0
+            elif dtype == 'string':
+                df[col] = pd.array([''] * len(df), dtype='string')
+            else:
+                df[col] = pd.NA
+
+    return df[_COLUMN_ORDER]
 
 
 def save_dataframe(df: pd.DataFrame, path: Path) -> None:
@@ -307,18 +347,18 @@ def process_underlying(
         f"All {len(dates)} date files for {underlying} will contain today's snapshot."
     )
 
-    # Fetch the snapshot once — re-use across all dates on free tier
-    rows = fetch_option_chain_snapshot(client, underlying)
-
-    if not rows:
-        logger.warning(f"{underlying}: snapshot returned 0 contracts. Nothing to write.")
-        return
-
     for d in dates:
         out = output_path(output_dir, underlying, d)
 
         if out.exists() and not force:
             logger.info(f"{underlying} {d}: skipping existing file {out}")
+            continue
+
+        # Fetch per-date (free tier ignores the date, paid tier uses it)
+        rows = fetch_option_chain_snapshot(client, underlying, snapshot_date=d)
+
+        if not rows:
+            logger.warning(f"{underlying} {d}: snapshot returned 0 contracts, skipping.")
             continue
 
         try:
@@ -384,8 +424,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     except ValueError:
         parser.error(f"--end must be in YYYY-MM-DD format, got: {args.end!r}")
 
-    if start_dt > end_dt:
-        parser.error(f"--start ({args.start}) must not be after --end ({args.end})")
+    if start_dt >= end_dt:
+        parser.error(f"--start ({args.start}) must be strictly before --end ({args.end})")
 
     # Store parsed date objects back on namespace
     args.start_date = start_dt
