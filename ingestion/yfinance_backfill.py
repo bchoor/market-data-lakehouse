@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import logging
+from datetime import datetime
 from pathlib import Path
 import yfinance as yf
 import pandas as pd
@@ -28,34 +29,40 @@ def download_and_compute(ticker: str, start: str, end: str) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # Rename columns to lowercase
+    # Single lowercasing pass — all subsequent checks use lowercase names
     df.columns = [c.lower() for c in df.columns]
+
+    # yfinance with auto_adjust=False: 'Adj Close' → lowercased to 'adj close'
+    # Rename to underscore form immediately after lowercasing
+    if 'adj close' in df.columns:
+        df = df.rename(columns={'adj close': 'adj_close'})
+
+    if 'adj_close' not in df.columns:
+        raise RuntimeError(
+            f"adj_close column not found for {ticker} after lowercasing. "
+            "Expected 'Adj Close' from yfinance with auto_adjust=False."
+        )
 
     # Add ticker column
     df['ticker'] = ticker
 
     # Reset index so date becomes a column
     df = df.reset_index()
-    df = df.rename(columns={'index': 'date', 'Date': 'date'})
-    if 'date' not in df.columns and 'Date' in df.columns:
-        df = df.rename(columns={'Date': 'date'})
-
-    # Ensure date column is named correctly
-    df.columns = [c.lower() for c in df.columns]
-
-    # yfinance with auto_adjust=False: 'Adj Close' is the split/dividend adjusted close
-    # Rename 'Adj Close' to 'adj_close' if it exists
-    if 'adj_close' not in df.columns and 'adj close' not in df.columns:
-        # Column names will be lowercased next, so check after that happens
-        pass
-    elif 'adj close' in df.columns:
-        df = df.rename(columns={'adj close': 'adj_close'})
-    elif 'Adj Close' in df.columns:
-        df = df.rename(columns={'Adj Close': 'adj_close'})
+    df = df.rename(columns={'index': 'date', 'date': 'date'})
 
     # Compute indicators using pandas-ta
     # Set the index back to date for pandas-ta compatibility
     df = df.set_index('date')
+
+    # NOTE: Warm-up NaN rows — the first N rows will have NaN for indicators
+    # that require look-back periods:
+    #   - SMA-20:  first 19 rows are NaN
+    #   - SMA-50:  first 49 rows are NaN
+    #   - SMA-200: first 199 rows are NaN  ← longest warm-up
+    #   - RSI-14:  first 14 rows are NaN
+    #   - MACD(12,26,9): first ~33 rows are NaN
+    # If you need fully-populated indicator values from a specific date, pass
+    # --start at least 200 trading days (~10 months) before that date.
 
     # SMA
     df.ta.sma(length=20, append=True)
@@ -84,54 +91,24 @@ def download_and_compute(ticker: str, start: str, end: str) -> pd.DataFrame:
     # Reset index so date is a column again
     df = df.reset_index()
 
-    # Rename all columns to lowercase first
+    # Lowercase all columns once after indicator computation
     df.columns = [c.lower() for c in df.columns]
 
-    # Rename pandas-ta output columns to canonical names
-    rename_map = {}
-
-    # SMA columns: SMA_20, SMA_50, SMA_200 -> sma_20, sma_50, sma_200 (already lowercased)
-    for col in df.columns:
-        col_lower = col.lower()
-        if col_lower == 'sma_20':
-            rename_map[col] = 'sma_20'
-        elif col_lower == 'sma_50':
-            rename_map[col] = 'sma_50'
-        elif col_lower == 'sma_200':
-            rename_map[col] = 'sma_200'
-        elif col_lower == 'ema_12':
-            rename_map[col] = 'ema_12'
-        elif col_lower == 'ema_26':
-            rename_map[col] = 'ema_26'
-        elif col_lower == 'rsi_14':
-            rename_map[col] = 'rsi_14'
-        # MACD columns: macdh_12_26_9 -> macd_hist, macds_12_26_9 -> macd_signal, macd_12_26_9 -> macd
-        elif col_lower == 'macdh_12_26_9':
-            rename_map[col] = 'macd_hist'
-        elif col_lower == 'macds_12_26_9':
-            rename_map[col] = 'macd_signal'
-        elif col_lower == 'macd_12_26_9':
-            rename_map[col] = 'macd'
-        # Bollinger Bands: bbu_20_2.0 -> bb_upper, bbm_20_2.0 -> bb_middle, etc.
-        elif col_lower == 'bbu_20_2.0':
-            rename_map[col] = 'bb_upper'
-        elif col_lower == 'bbm_20_2.0':
-            rename_map[col] = 'bb_middle'
-        elif col_lower == 'bbl_20_2.0':
-            rename_map[col] = 'bb_lower'
-        elif col_lower == 'bbb_20_2.0':
-            rename_map[col] = 'bb_bandwidth'
-        elif col_lower == 'bbp_20_2.0':
-            rename_map[col] = 'bb_pct_b'
-        # ATR: atrr_14 or atr_14 -> atr_14
-        elif col_lower in ('atrr_14', 'atr_14'):
-            rename_map[col] = 'atr_14'
-        # OBV: obv -> obv (already lowercase, no change needed unless different case)
-
-    df = df.rename(columns=rename_map)
-
-    # Ensure all columns are lowercase
-    df.columns = [c.lower() for c in df.columns]
+    # Rename pandas-ta output columns to canonical names.
+    # Only columns that need renaming are listed — identity renames are omitted.
+    rename_mapping = {
+        'macdh_12_26_9': 'macd_hist',
+        'macds_12_26_9': 'macd_signal',
+        'macd_12_26_9': 'macd',
+        'bbu_20_2.0': 'bb_upper',
+        'bbm_20_2.0': 'bb_middle',
+        'bbl_20_2.0': 'bb_lower',
+        'bbb_20_2.0': 'bb_bandwidth',
+        'bbp_20_2.0': 'bb_pct_b',
+        'atrr_14': 'atr_14',  # pandas_ta Wilder ATR variant
+        'atr_14': 'atr_14',   # pandas_ta simple ATR variant (no-op, explicit for clarity)
+    }
+    df = df.rename(columns=rename_mapping)
 
     # Select and reorder final columns
     final_columns = [
@@ -208,6 +185,19 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Validate --start and --end date formats and ordering
+    try:
+        start_dt = datetime.strptime(args.start, '%Y-%m-%d')
+    except ValueError:
+        parser.error(f"--start must be in YYYY-MM-DD format, got: {args.start!r}")
+    try:
+        end_dt = datetime.strptime(args.end, '%Y-%m-%d')
+    except ValueError:
+        parser.error(f"--end must be in YYYY-MM-DD format, got: {args.end!r}")
+    if start_dt >= end_dt:
+        parser.error(f"--start ({args.start}) must be before --end ({args.end})")
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
