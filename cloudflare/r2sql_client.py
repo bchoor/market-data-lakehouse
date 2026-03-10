@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 
 import pandas as pd
 import requests
@@ -47,6 +48,29 @@ class ConnectionError(Exception):  # noqa: A001 — intentional shadow for clari
 _CF_SQL_ENDPOINT = (
     "https://api.cloudflare.com/client/v4/accounts/{account_id}/analytics/r2/sql"
 )
+
+# Matches LIMIT <n> at the END of a statement (with optional semicolon/whitespace).
+# Used to avoid appending a second LIMIT when one already exists.
+_LIMIT_RE = re.compile(r'\blimit\s+\d+\s*;?\s*$', re.IGNORECASE)
+
+# Valid SQL identifiers: letters/underscores start, then alphanumeric/underscores/dots.
+_IDENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_.]*$')
+
+
+def _validate_identifier(name: str, label: str = "identifier") -> None:
+    """Validate a SQL identifier to prevent injection.
+
+    Raises
+    ------
+    ValueError
+        If *name* contains characters outside ``[A-Za-z0-9_.]`` or does not
+        start with a letter or underscore.
+    """
+    if not _IDENT_RE.match(name):
+        raise ValueError(
+            f"Invalid {label}: {name!r}. "
+            "Only alphanumeric characters, underscores, and dots are allowed."
+        )
 
 
 class R2SQLClient:
@@ -135,6 +159,12 @@ class R2SQLClient:
 
     @staticmethod
     def _results_to_df(result: list[dict]) -> pd.DataFrame:
+        if not isinstance(result, list):
+            raise QueryError(
+                f"Unexpected API response shape: expected list, got "
+                f"{type(result).__name__}. "
+                "Check CF API docs if the endpoint has changed."
+            )
         if not result:
             return pd.DataFrame()
         return pd.DataFrame(result)
@@ -150,10 +180,11 @@ class R2SQLClient:
     def query(self, sql: str, max_rows: int = 10000) -> pd.DataFrame:
         """Execute *sql* and return results as a :class:`pandas.DataFrame`.
 
-        If *max_rows* is set and the query does not already contain a
-        ``LIMIT`` clause, one is appended automatically.
+        If *max_rows* is a positive integer and the query does not already end
+        with a ``LIMIT`` clause, one is appended automatically.  Pass
+        ``max_rows=0`` or ``max_rows=None`` to fetch all rows without a limit.
         """
-        if max_rows and "limit" not in sql.lower():
+        if max_rows is not None and max_rows > 0 and not _LIMIT_RE.search(sql.rstrip()):
             sql = f"{sql.rstrip().rstrip(';')} LIMIT {max_rows}"
 
         data = self._post(sql)
@@ -181,6 +212,7 @@ class R2SQLClient:
 
         Columns: ``column_name``, ``data_type``, ``nullable``.
         """
+        _validate_identifier(table, "table name")
         try:
             raw = self.query(f"DESCRIBE {table}", max_rows=0)
             # Normalise to the expected column names.
@@ -203,10 +235,13 @@ class R2SQLClient:
 
     def sample(self, table: str, n: int = 5) -> pd.DataFrame:
         """Return the first *n* rows of *table* as a quick data preview."""
+        _validate_identifier(table, "table name")
         return self.query(f"SELECT * FROM {table} LIMIT {n}", max_rows=0)
 
     def get_date_range(self, table: str, date_col: str = "date") -> dict:
         """Return ``min_date``, ``max_date``, and ``row_count`` for *table*."""
+        _validate_identifier(table, "table name")
+        _validate_identifier(date_col, "date column")
         df = self.query(
             f"SELECT MIN({date_col}) AS min_date, "
             f"MAX({date_col}) AS max_date, "
