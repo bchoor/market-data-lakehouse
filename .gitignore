@@ -13,7 +13,7 @@ env/
 # Data files (never commit data)
 data/
 *.parquet
-*.csv
+data/*.csv
 
 # Environment
 .env
