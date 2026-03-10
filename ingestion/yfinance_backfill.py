@@ -19,7 +19,7 @@ def safe_ticker_path(ticker: str) -> str:
 def download_and_compute(ticker: str, start: str, end: str) -> pd.DataFrame:
     """Download OHLCV data for ticker and compute technical indicators."""
     logger.info(f"Downloading {ticker} from {start} to {end}")
-    df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
+    df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
 
     if df.empty:
         raise ValueError(f"No data returned for {ticker}")
@@ -43,12 +43,15 @@ def download_and_compute(ticker: str, start: str, end: str) -> pd.DataFrame:
     # Ensure date column is named correctly
     df.columns = [c.lower() for c in df.columns]
 
-    # yfinance with auto_adjust=True: adjusted close is in 'close', no separate 'adj close'
-    # We'll store adj_close as a copy of close (since auto_adjust=True means close IS adj close)
+    # yfinance with auto_adjust=False: 'Adj Close' is the split/dividend adjusted close
+    # Rename 'Adj Close' to 'adj_close' if it exists
     if 'adj_close' not in df.columns and 'adj close' not in df.columns:
-        df['adj_close'] = df['close']
+        # Column names will be lowercased next, so check after that happens
+        pass
     elif 'adj close' in df.columns:
         df = df.rename(columns={'adj close': 'adj_close'})
+    elif 'Adj Close' in df.columns:
+        df = df.rename(columns={'Adj Close': 'adj_close'})
 
     # Compute indicators using pandas-ta
     # Set the index back to date for pandas-ta compatibility
@@ -120,8 +123,8 @@ def download_and_compute(ticker: str, start: str, end: str) -> pd.DataFrame:
             rename_map[col] = 'bb_bandwidth'
         elif col_lower == 'bbp_20_2.0':
             rename_map[col] = 'bb_pct_b'
-        # ATR: atrr_14 -> atr_14
-        elif col_lower == 'atrr_14':
+        # ATR: atrr_14 or atr_14 -> atr_14
+        elif col_lower in ('atrr_14', 'atr_14'):
             rename_map[col] = 'atr_14'
         # OBV: obv -> obv (already lowercase, no change needed unless different case)
 
