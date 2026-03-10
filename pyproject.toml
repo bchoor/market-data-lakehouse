@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "market-data-lakehouse"
@@ -9,7 +9,7 @@ description = "Market data lakehouse on Cloudflare R2 — stocks, ETFs, options,
 requires-python = ">=3.11"
 dependencies = [
     "yfinance>=0.2.40",
-    "pandas>=2.0.0",
+    "pandas>=1.5.0,<2.0.0",
     "pandas-ta>=0.3.14b",
     "py_vollib>=1.0.1",
     "pyiceberg[s3fs]>=0.6.0",
@@ -26,6 +26,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
+    "black>=24.0.0",
+    "ruff>=0.4.0",
 ]
