@@ -14,9 +14,12 @@ Environment variables required (set in .env):
     R2_BUCKET_NAME  (optional, defaults to "market-data-lakehouse")
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
 
@@ -46,6 +49,11 @@ except ImportError as _e:
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
+
+def _sql_escape(value: str) -> str:
+    """Escape single quotes for DuckDB SET statements."""
+    return value.replace("'", "''")
+
 
 class DuckDBLocalClient:
     """
@@ -104,9 +112,9 @@ class DuckDBLocalClient:
         bucket = os.environ.get("R2_BUCKET_NAME", "market-data-lakehouse")
 
         try:
-            self.conn.execute(f"SET s3_endpoint='{account_id}.r2.cloudflarestorage.com';")
-            self.conn.execute(f"SET s3_access_key_id='{access_key}';")
-            self.conn.execute(f"SET s3_secret_access_key='{secret_key}';")
+            self.conn.execute(f"SET s3_endpoint='{_sql_escape(account_id)}.r2.cloudflarestorage.com';")
+            self.conn.execute(f"SET s3_access_key_id='{_sql_escape(access_key)}';")
+            self.conn.execute(f"SET s3_secret_access_key='{_sql_escape(secret_key)}';")
             self.conn.execute("SET s3_url_style='path';")
             self.conn.execute("SET s3_use_ssl=true;")
         except Exception as e:
@@ -137,9 +145,11 @@ class DuckDBLocalClient:
                 self.conn.execute(
                     f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM iceberg_scan('{path}');"
                 )
-            except Exception:
-                # Table may not exist yet — that's fine, skip silently
-                pass
+            except Exception as e:
+                # Silently skip — table may not exist yet in R2
+                # Set DUCKDB_DEBUG=1 to see why views were skipped
+                if os.environ.get("DUCKDB_DEBUG"):
+                    logger.debug(f"Could not register view '{name}': {e}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -257,12 +267,10 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
+    client = None
     try:
         client = DuckDBLocalClient()
-    except (EnvironmentError, Exception) as e:
-        sys.exit(1)
 
-    try:
         if args.sql:
             df = client.query(args.sql)
             if df.empty:
@@ -285,7 +293,8 @@ def main() -> None:
         print(f"ERROR: {e}")
         sys.exit(1)
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 if __name__ == "__main__":
