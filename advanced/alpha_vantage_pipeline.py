@@ -34,6 +34,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
+
+class AVRateLimitError(Exception):
+    """Raised when Alpha Vantage returns a rate-limit response (HTTP 429 or Note in body)."""
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -52,7 +56,7 @@ _SCHEMA_DTYPES: dict[str, str] = {
     'implied_volatility': 'float64',
     'volume': 'Int64',
     'open_interest': 'Int64',
-    'in_the_money': 'object',
+    'in_the_money': 'boolean',
     'delta': 'float64',
     'gamma': 'float64',
     'theta': 'float64',
@@ -103,7 +107,7 @@ def fetch_options_for_date(underlying: str, date_str: str, api_key: str) -> list
     # Rate limit (HTTP 429)
     if resp.status_code == 429:
         logger.warning(f"{underlying} {date_str}: HTTP 429 — rate limited")
-        return []
+        raise AVRateLimitError(f"HTTP 429 rate limit for {underlying} {date_str}")
 
     if not resp.ok:
         logger.warning(f"{underlying} {date_str}: unexpected HTTP {resp.status_code}, skipping")
@@ -120,7 +124,7 @@ def fetch_options_for_date(underlying: str, date_str: str, api_key: str) -> list
         note = payload["Note"]
         if "API call frequency" in note or "rate limit" in note.lower():
             logger.warning(f"{underlying} {date_str}: AV rate limit note — {note}")
-            return []
+            raise AVRateLimitError(f"AV rate limit note for {underlying} {date_str}: {note}")
 
     # Detect info / error messages
     if "Information" in payload:
@@ -200,9 +204,9 @@ def parse_contract(record: dict, underlying: str, date_str: str) -> dict | None:
             expiration = None
 
     # Price fields
-    bid = _safe_float(record.get("bid"), 0.0)
-    ask = _safe_float(record.get("ask"), 0.0)
-    mid_price = round((bid + ask) / 2.0, 4) if (bid or ask) else 0.0
+    bid = _safe_float(record.get("bid"), np.nan)
+    ask = _safe_float(record.get("ask"), np.nan)
+    mid_price = round((bid + ask) / 2.0, 4) if not (pd.isna(bid) or pd.isna(ask)) else np.nan
 
     # Greeks — Alpha Vantage provides delta, gamma, theta, vega; no rho
     delta_val = _safe_float(record.get("delta"))
@@ -289,9 +293,13 @@ def rows_to_dataframe(rows: list[dict]) -> pd.DataFrame:
         else:
             df[col] = pd.array([pd.NA] * len(df), dtype="string")
 
-    # Date column — keep as Python date objects
+    # Date column — keep as plain string (YYYY-MM-DD, object dtype)
     if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        df["date"] = df["date"].astype("object")
+
+    # Nullable boolean column
+    if "in_the_money" in df.columns:
+        df["in_the_money"] = df["in_the_money"].astype("boolean")
 
     # Ensure all columns are present
     for col in _COLUMN_ORDER:
@@ -376,29 +384,29 @@ def fetch_with_retry(
     underlying: str,
     date_str: str,
     api_key: str,
-    output_dir: Path,
-    force: bool,
-    sleep_seconds: float,
     max_retries: int = 3,
-    retry_sleep: float = 60.0,
-) -> bool:
-    """Wrap process_underlying_date with retry logic for rate-limit responses.
+    base_sleep: float = 60.0,
+) -> list[dict]:
+    """Fetch options data with retry logic for rate-limit responses.
 
-    Detects rate limiting by checking if the fetch returned 0 records due to
-    an AV Note or HTTP 429, then waits retry_sleep seconds before retrying.
+    Calls fetch_options_for_date and retries on AVRateLimitError, sleeping
+    base_sleep * (attempt + 1) seconds between attempts.
+
+    Returns the list of raw record dicts, or [] if retries are exhausted.
     """
     for attempt in range(max_retries):
-        result = process_underlying_date(
-            underlying=underlying,
-            date_str=date_str,
-            api_key=api_key,
-            output_dir=output_dir,
-            force=force,
-            sleep_seconds=sleep_seconds,
-        )
-        return result
-
-    return False
+        try:
+            return fetch_options_for_date(underlying, date_str, api_key)
+        except AVRateLimitError:
+            if attempt < max_retries - 1:
+                sleep_time = base_sleep * (attempt + 1)
+                logger.warning(
+                    f"Rate limit hit, sleeping {sleep_time}s "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(sleep_time)
+    logger.error(f"Rate limit retry exhausted for {underlying} {date_str}")
+    return []
 
 
 # ---------------------------------------------------------------------------
