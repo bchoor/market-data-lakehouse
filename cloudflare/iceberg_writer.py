@@ -227,8 +227,14 @@ def _dates_in_table(iceberg_table) -> set[str]:
         date_col = arrow_result.column("date")
         # PyArrow date32 columns cast to Python date objects via .to_pylist()
         return {str(d) for d in date_col.to_pylist() if d is not None}
-    except Exception:
-        # Empty table or no data yet — treat as empty
+    except Exception as e:
+        # Only truly empty table / table-not-found scenarios should return empty set.
+        # All other errors (network, auth) emit a warning so operator knows
+        # deduplication was skipped.
+        error_str = str(e).lower()
+        if "nosuchtable" in error_str or "not found" in error_str or "does not exist" in error_str:
+            return set()
+        print(f"  [warn] Could not read existing dates — deduplication skipped: {e}")
         return set()
 
 
@@ -274,7 +280,8 @@ def _write_file(
 
     # Determine dates present in this file
     if "date" in df.columns:
-        file_dates = {str(d) for d in pd.to_datetime(df["date"]).dt.date}
+        parsed_dates = pd.to_datetime(df["date"]).dt.date
+        file_dates = {str(d) for d in parsed_dates}
         already_loaded = file_dates & existing_dates
         if already_loaded and already_loaded == file_dates:
             print(f"  [skip] {parquet_path.name} — dates already in table: {sorted(already_loaded)}")
@@ -284,13 +291,19 @@ def _write_file(
                 f"  [warn] {parquet_path.name} — partial overlap: "
                 f"{sorted(already_loaded)} already loaded; appending remainder"
             )
-            df = df[~pd.to_datetime(df["date"]).dt.date.astype(str).isin(already_loaded)]
+            df = df[~parsed_dates.astype(str).isin(already_loaded)]
 
     row_count = len(df)
     print(f"  [write] {parquet_path.name} — {row_count:,} rows")
 
+    # Cast integer columns to proper nullable int before Arrow conversion
+    INT_COLS = ("volume", "open_interest", "obv")
+    for col in INT_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
     arrow_schema = iceberg_table.schema().as_arrow()
-    arrow_table = pa.Table.from_pandas(df, schema=arrow_schema, safe=False)
+    arrow_table = pa.Table.from_pandas(df, schema=arrow_schema, safe=True)  # safe=True after explicit cast
     iceberg_table.append(arrow_table)
 
     return row_count, False
