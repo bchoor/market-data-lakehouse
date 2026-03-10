@@ -36,22 +36,31 @@ _env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=_env_path, override=False)
 
 
-def _require_env(name: str, default: str | None = None) -> str:
-    value = os.environ.get(name, default)
-    if not value:
-        print(f"  ERROR: required environment variable {name} is not set.")
-        sys.exit(1)
-    return value
-
-
 def _load_config() -> dict:
+    """Load config from environment, reporting all missing required vars at once."""
+    required_vars = [
+        "CF_ACCOUNT_ID",
+        "CF_API_TOKEN",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "R2_BUCKET_NAME",
+        "R2_CATALOG_NAME",
+    ]
+    missing = [v for v in required_vars if not os.environ.get(v)]
+    if missing:
+        print("ERROR: Missing required environment variables:")
+        for v in missing:
+            print(f"  - {v}")
+        print("Copy .env.example to .env and fill in your credentials.")
+        sys.exit(1)
+
     return {
-        "account_id": _require_env("CF_ACCOUNT_ID"),
-        "api_token": _require_env("CF_API_TOKEN"),
-        "access_key_id": _require_env("R2_ACCESS_KEY_ID"),
-        "secret_access_key": _require_env("R2_SECRET_ACCESS_KEY"),
-        "bucket_name": _require_env("R2_BUCKET_NAME", "market-data-lakehouse"),
-        "catalog_name": _require_env("R2_CATALOG_NAME", "market-data-catalog"),
+        "account_id": os.environ["CF_ACCOUNT_ID"],
+        "api_token": os.environ["CF_API_TOKEN"],
+        "access_key_id": os.environ["R2_ACCESS_KEY_ID"],
+        "secret_access_key": os.environ["R2_SECRET_ACCESS_KEY"],
+        "bucket_name": os.environ.get("R2_BUCKET_NAME", "market-data-lakehouse"),
+        "catalog_name": os.environ.get("R2_CATALOG_NAME", "market-data-catalog"),
     }
 
 
@@ -180,11 +189,13 @@ def _bucket_stats(s3, bucket_name: str) -> dict:
 
 
 def _format_bytes(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
+    units = ("B", "KB", "MB", "GB", "TB", "PB")
+    value = float(n)
+    for unit in units[:-1]:
+        if value < 1024.0:
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} {units[-1]}"
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +231,7 @@ def cmd_check(cfg: dict) -> int:
         print(f"  {mark}  R2 Data Catalog '{cfg['catalog_name']}': {label}")
         if not ok:
             all_ok = False
-    except requests.HTTPError as exc:
+    except (requests.HTTPError, requests.RequestException) as exc:
         print(f"  ✗  R2 Data Catalog '{cfg['catalog_name']}': ERROR — {exc}")
         all_ok = False
 
@@ -348,7 +359,7 @@ def cmd_status(cfg: dict) -> int:
                         if val is not None:
                             print(f"  {key:<12}: {val}")
             print(f"  Endpoint: {_catalog_base_url(cfg)}")
-    except requests.HTTPError as exc:
+    except (requests.HTTPError, requests.RequestException) as exc:
         print(f"  ERROR  : {exc}")
         print(
             "  NOTE: CF R2 Data Catalog API endpoints may have changed.\n"
