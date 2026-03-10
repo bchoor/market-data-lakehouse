@@ -46,3 +46,15 @@ def get_table_date_range(table_name: str) -> dict:
     """
     client = R2SQLClient()
     return client.get_date_range(table_name)
+
+
+def list_all_tables() -> list[str]:
+    """Return a list of all table names in the R2 catalog.
+
+    Returns
+    -------
+    list[str]
+        Table names available in the lakehouse.
+    """
+    client = R2SQLClient()
+    return client.list_tables()

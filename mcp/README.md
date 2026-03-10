@@ -90,6 +90,10 @@ Location of the config file:
 }
 ```
 
+> **Note:** Claude Code reads `.env` from the directory where the MCP server runs.
+> Ensure your `.env` file exists in the project root with `CF_ACCOUNT_ID`,
+> `CF_API_TOKEN`, and `R2_CATALOG_NAME` set before starting the server.
+
 Claude Code picks up `.mcp.json` automatically when you open the project. Credentials are read from `.env` via `python-dotenv`.
 
 ---

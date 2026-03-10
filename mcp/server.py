@@ -14,14 +14,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     from mcp.server.fastmcp import FastMCP
+except ImportError:
+    raise ImportError(
+        "FastMCP not found. Install with: pip install mcp\n"
+        "Or: pip install -e . from the project root"
+    )
 
-    _FASTMCP = True
-except ImportError:  # pragma: no cover — fallback for older SDK installs
-    from mcp.server import Server as _Server  # noqa: F401
-
-    _FASTMCP = False
-
-from cloudflare.r2sql_client import AuthError, QueryError, R2SQLClient, RateLimitError
+from cloudflare.r2sql_client import AuthError, QueryError, RateLimitError
+from mcp.tools.query import execute_query
+from mcp.tools.schema import get_table_date_range, get_table_schema, list_all_tables
 
 # ---------------------------------------------------------------------------
 # Server instantiation
@@ -68,13 +69,11 @@ def query_market_data(sql: str) -> str:
 
     Returns results as a markdown table. Max 1000 rows returned.
     """
-    client = R2SQLClient()
     try:
-        df = client.query(sql, max_rows=1000)
-        if df.empty:
+        result, row_count = execute_query(sql, max_rows=1000)
+        if row_count == 0:
             return "Query returned no results."
-        result = df.to_markdown(index=False)
-        return f"**{len(df)} rows returned**\n\n{result}"
+        return f"**{row_count} rows returned**\n\n{result}"
     except AuthError as e:
         return f"Authentication error: {e}\nCheck CF_API_TOKEN in your .env file."
     except QueryError as e:
@@ -88,11 +87,12 @@ def query_market_data(sql: str) -> str:
 @mcp.tool()
 def list_tables() -> str:
     """List all available tables in the market data lakehouse with row counts and date ranges."""
-    client = R2SQLClient()
     try:
-        tables = client.list_tables()
+        tables = list_all_tables()
     except AuthError as e:
         return f"Authentication error: {e}\nCheck CF_API_TOKEN in your .env file."
+    except RateLimitError:
+        return "Rate limit hit. Wait a moment and try again."
     except Exception as e:  # noqa: BLE001
         return f"Error listing tables: {e}"
 
@@ -105,7 +105,7 @@ def list_tables() -> str:
 
     for table in tables:
         try:
-            info = client.get_date_range(table)
+            info = get_table_date_range(table)
             row_count = f"{info['row_count']:,}"
             min_date = str(info["min_date"]) if info["min_date"] is not None else "—"
             max_date = str(info["max_date"]) if info["max_date"] is not None else "—"
@@ -138,10 +138,8 @@ def describe_table(table_name: str) -> str:
     table_name:
         One of: ohlcv, options, options_greeks
     """
-    client = R2SQLClient()
     try:
-        schema_df = client.describe_table(table_name)
-        sample_df = client.sample(table_name, 3)
+        schema_md, sample_md = get_table_schema(table_name)
     except AuthError as e:
         return f"Authentication error: {e}\nCheck CF_API_TOKEN in your .env file."
     except QueryError as e:
@@ -158,14 +156,14 @@ def describe_table(table_name: str) -> str:
         lines.append(f"{full_description}\n")
 
     lines.append("### Schema\n")
-    if not schema_df.empty:
-        lines.append(schema_df.to_markdown(index=False))
+    if schema_md:
+        lines.append(schema_md)
     else:
         lines.append("_Schema not available._")
 
     lines.append("\n### Sample Rows (3)\n")
-    if not sample_df.empty:
-        lines.append(sample_df.to_markdown(index=False))
+    if sample_md:
+        lines.append(sample_md)
     else:
         lines.append("_No rows found — table may be empty._")
 
@@ -183,9 +181,8 @@ def get_date_range(table_name: str) -> str:
     table_name:
         One of: ohlcv, options, options_greeks
     """
-    client = R2SQLClient()
     try:
-        info = client.get_date_range(table_name)
+        info = get_table_date_range(table_name)
     except AuthError as e:
         return f"Authentication error: {e}\nCheck CF_API_TOKEN in your .env file."
     except QueryError as e:
