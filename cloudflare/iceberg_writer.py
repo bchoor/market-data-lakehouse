@@ -250,7 +250,7 @@ def _discover_parquet_files(source_dir: Path, date_filter: str | None) -> list[P
     If date_filter is provided (YYYY-MM-DD), only files whose stem matches the
     date string are included (e.g. ``2024-01-15.parquet``).
     """
-    all_files = sorted(source_dir.glob("*.parquet"))
+    all_files = sorted(source_dir.glob("**/*.parquet"))
     if date_filter:
         all_files = [f for f in all_files if date_filter in f.stem]
     return all_files

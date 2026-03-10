@@ -1,9 +1,9 @@
 """MCP server exposing the R2 SQL market-data lakehouse to Claude and other MCP clients.
 
 Run directly:
-    python mcp/server.py
+    python mcp_server/server.py
 
-Or configure in Claude Desktop / Claude Code — see mcp/README.md.
+Or configure in Claude Desktop / Claude Code — see mcp_server/README.md.
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ except ImportError:
     )
 
 from cloudflare.r2sql_client import AuthError, QueryError, RateLimitError
-from mcp.tools.query import execute_query
-from mcp.tools.schema import get_table_date_range, get_table_schema, list_all_tables
+from mcp_server.tools.query import execute_query
+from mcp_server.tools.schema import get_table_date_range, get_table_schema, list_all_tables
 
 # ---------------------------------------------------------------------------
 # Server instantiation

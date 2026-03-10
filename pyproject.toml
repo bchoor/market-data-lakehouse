@@ -9,7 +9,7 @@ description = "Market data lakehouse on Cloudflare R2 — stocks, ETFs, options,
 requires-python = ">=3.11"
 dependencies = [
     "yfinance>=0.2.40",
-    "pandas>=1.5.0,<2.0.0",
+    "pandas>=2.0.0",
     "pandas-ta>=0.3.14b",
     "py_vollib>=1.0.1",
     "pyiceberg[s3fs]>=0.6.0",

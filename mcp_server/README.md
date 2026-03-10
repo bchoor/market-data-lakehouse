@@ -48,7 +48,7 @@ R2_CATALOG_NAME=market-data-catalog
 ### 3. Run the server
 
 ```bash
-python mcp/server.py
+python mcp_server/server.py
 ```
 
 ---
@@ -62,7 +62,7 @@ python mcp/server.py
   "mcpServers": {
     "market-data": {
       "command": "python",
-      "args": ["/path/to/market-data-lakehouse/mcp/server.py"],
+      "args": ["/path/to/market-data-lakehouse/mcp_server/server.py"],
       "env": {
         "CF_ACCOUNT_ID": "your_account_id",
         "CF_API_TOKEN": "your_api_token",
@@ -84,7 +84,7 @@ Location of the config file:
   "mcpServers": {
     "market-data": {
       "command": "python",
-      "args": ["mcp/server.py"]
+      "args": ["mcp_server/server.py"]
     }
   }
 }
