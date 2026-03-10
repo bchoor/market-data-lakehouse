@@ -15,8 +15,10 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
+import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -53,16 +55,31 @@ def load_checkpoint(path: Path) -> dict:
                 data = json.load(fh)
             logger.info("Loaded checkpoint from %s", path)
             return data
-        except (json.JSONDecodeError, OSError) as exc:
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Checkpoint file %s is corrupted and could not be parsed (%s) — starting fresh",
+                path,
+                exc,
+            )
+        except OSError as exc:
             logger.warning("Could not read checkpoint %s: %s — starting fresh", path, exc)
     return {"last_run": None, "ohlcv": {}, "options": {}, "greeks": {}}
 
 
 def save_checkpoint(checkpoint: dict, path: Path) -> None:
-    """Persist checkpoint to JSON file."""
+    """Persist checkpoint to JSON file atomically (write-to-temp then rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as fh:
-        json.dump(checkpoint, fh, indent=2)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".checkpoint-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(checkpoint, fh, indent=2, default=str)
+        os.replace(tmp, path)  # atomic on POSIX
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     logger.debug("Checkpoint saved to %s", path)
 
 
@@ -283,17 +300,32 @@ def run_pipeline(args: argparse.Namespace) -> None:
     # -----------------------------------------------------------------------
     logger.info("=== Step 3: Greeks ===")
 
-    ok, output = run_greeks(args.options_dir, args.greeks_dir, args.ohlcv_dir)
-    if ok:
+    options_all_failed = len(args.underlyings) > 0 and all(
+        f"options:{u}" in failures for u in args.underlyings
+    )
+    if options_all_failed:
+        logger.warning("Skipping greeks step — options failed for all underlyings")
         for u in args.underlyings:
-            checkpoint.setdefault("greeks", {})[u] = end_str
-            greeks_summary.append(f"{u} ({end_str})")
-        save_checkpoint(checkpoint, checkpoint_path)
+            failures.append(f"greeks:{u} (skipped — options failed)")
+            greeks_summary.append(f"{u} (SKIPPED — options step failed for all underlyings)")
     else:
-        for u in args.underlyings:
-            failures.append(f"greeks:{u}")
-            greeks_summary.append(f"{u} (FAILED)")
-        logger.error("Greeks calculation failed: %s", output)
+        ok, output = run_greeks(args.options_dir, args.greeks_dir, args.ohlcv_dir)
+        if ok:
+            # Use the minimum successfully-checkpointed options date as the greeks checkpoint
+            options_dates = [
+                v for k, v in checkpoint.get("options", {}).items()
+                if k in args.underlyings
+            ]
+            greeks_checkpoint_date = min(options_dates) if options_dates else end_str
+            for u in args.underlyings:
+                checkpoint.setdefault("greeks", {})[u] = greeks_checkpoint_date
+                greeks_summary.append(f"{u} ({greeks_checkpoint_date})")
+            save_checkpoint(checkpoint, checkpoint_path)
+        else:
+            for u in args.underlyings:
+                failures.append(f"greeks:{u}")
+                greeks_summary.append(f"{u} (FAILED)")
+            logger.error("Greeks calculation failed: %s", output)
 
     # -----------------------------------------------------------------------
     # Summary
