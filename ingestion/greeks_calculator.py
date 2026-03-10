@@ -84,7 +84,7 @@ def compute_greeks_row(flag: str, S: float, K: float, t: float, r: float, sigma:
         return dict(_NAN_GREEKS)
     if (
         sigma is None or np.isnan(sigma) or sigma <= 0
-        or t is None or np.isnan(t) or t <= 0
+        or t is None or np.isnan(t) or t <= 0  # t <= 0: expired or invalid option
         or K is None or np.isnan(K) or K <= 0
         or S is None or np.isnan(S) or S <= 0
     ):
@@ -142,12 +142,15 @@ def get_spot_price(underlying: str, trade_date: date, ohlcv_dir: Path) -> float 
             break
 
     if date_col is None:
-        # Try the index
+        # Try the index — after reset_index(), the former index becomes the first column
+        # Its name could be 'Date', 'date', 'index', or something else
         ohlcv_df = ohlcv_df.reset_index()
-        if 'index' in ohlcv_df.columns:
-            ohlcv_df = ohlcv_df.rename(columns={'index': 'date'})
-            date_col = 'date'
-        else:
+        for col in ['date', 'Date', 'index', ohlcv_df.columns[0]]:
+            if col in ohlcv_df.columns:
+                date_col = col
+                break
+
+        if date_col is None:
             logger.warning(f"No date column found in {ohlcv_file}")
             return None
 
@@ -332,6 +335,9 @@ def main() -> None:
 
     if not input_dir.exists():
         parser.error(f"--input-dir does not exist: {input_dir}")
+
+    if ohlcv_dir is not None and not ohlcv_dir.exists():
+        parser.error(f"--ohlcv-dir does not exist: {ohlcv_dir}")
 
     if not PY_VOLLIB_AVAILABLE:
         logger.warning(
